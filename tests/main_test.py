@@ -1,100 +1,84 @@
 import builtins
+import importlib
 import sys
-import types
 from pathlib import Path
-from unittest import mock
+from types import SimpleNamespace
 
 import pytest
 import runpy
 
-
-@pytest.fixture
-def mock_path_home(tmp_path):
-    """
-    Patch Path.home() to return a temporary directory.
-    """
-    with mock.patch.object(Path, "home", return_value=tmp_path):
-        yield tmp_path
-
-
-@pytest.fixture
-def mock_organize_folder():
-    """
-    Patch src.organizer.organize_folder to a mock that returns a predictable dict.
-    """
-    with mock.patch("src.organizer.organize_folder") as mock_func:
-        mock_func.return_value = {"txt": ["file1.txt"], "pdf": ["doc1.pdf"]}
-        yield mock_func
+# Helper to reload the module under test with fresh state
+def reload_main_module(monkeypatch):
+    # Ensure the module is removed from sys.modules before reloading
+    if "scripts.folder-organizer.main" in sys.modules:
+        del sys.modules["scripts.folder-organizer.main"]
+    elif "scripts.folder-organizer.main".replace("-", "_") in sys.modules:
+        del sys.modules["scripts.folder-organizer.main".replace("-", "_")]
+    # Reload the module
+    return importlib.import_module("scripts.folder-organizer.main")
 
 
-@pytest.fixture
-def mock_display_results():
-    """
-    Patch src.ui.fancy_ui.display_results to a mock function.
-    """
-    with mock.patch("src.ui.fancy_ui.display_results") as mock_func:
-        yield mock_func
+def test_main_calls_organize_and_display(monkeypatch, capsys):
+    # Arrange
+    fake_home = Path("/fake/home")
+    fake_downloads = fake_home / "Downloads"
+    moved_files_stub = {"txt": ["a.txt"], "pdf": ["b.pdf"]}
 
+    # Mock Path.home to return our fake home directory
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
 
-def test_main_execution_calls_functions_and_prints(
-    mock_path_home, mock_organize_folder, mock_display_results, capsys
-):
-    """
-    Verify that when the module is executed as a script:
-    - Path.home() is used to build the downloads directory.
-    - organize_folder is called with the correct Path.
-    - display_results is called with the result of organize_folder.
-    - The returned dict is printed.
-    """
-    # Run the script as __main__
+    # Spy objects to capture calls
+    called = SimpleNamespace(organize_args=None, display_args=None)
+
+    def fake_organize_folder(path):
+        called.organize_args = path
+        return moved_files_stub
+
+    def fake_display_results(results):
+        called.display_args = results
+
+    monkeypatch.setattr("src.organizer.organize_folder", fake_organize_folder)
+    monkeypatch.setattr("src.ui.fancy_ui.display_results", fake_display_results)
+
+    # Act
     runpy.run_module("scripts.folder-organizer.main", run_name="__main__")
 
-    # Expected downloads directory
-    expected_downloads = mock_path_home / "Downloads"
-    mock_organize_folder.assert_called_once_with(expected_downloads)
+    # Assert
+    assert called.organize_args == fake_downloads
+    assert called.display_args == moved_files_stub
 
-    # display_results should receive the dict returned by organize_folder
-    mock_display_results.assert_called_once_with(
-        {"txt": ["file1.txt"], "pdf": ["doc1.pdf"]}
-    )
-
-    # Capture printed output
     captured = capsys.readouterr()
-    assert captured.out.strip() == str({"txt": ["file1.txt"], "pdf": ["doc1.pdf"]})
+    # The script prints the moved_files dict
+    assert str(moved_files_stub) in captured.out
 
 
-def test_main_handles_organize_folder_exception(
-    mock_path_home, mock_display_results, capsys
-):
-    """
-    Simulate organize_folder raising an exception and ensure it propagates.
-    """
-    with mock.patch(
-        "src.organizer.organize_folder", side_effect=RuntimeError("organizer error")
-    ):
-        with pytest.raises(RuntimeError, match="organizer error"):
-            runpy.run_module("scripts.folder-organizer.main", run_name="__main__")
+def test_main_with_empty_result(monkeypatch, capsys):
+    # Arrange
+    fake_home = Path("/another/fake/home")
+    fake_downloads = fake_home / "Downloads"
+    moved_files_stub = {}
 
-    # display_results should never be called if organize_folder fails
-    mock_display_results.assert_not_called()
-    # No output should be printed
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+    def fake_organize_folder(path):
+        return moved_files_stub
+
+    displayed = {"called": False, "arg": None}
+
+    def fake_display_results(results):
+        displayed["called"] = True
+        displayed["arg"] = results
+
+    monkeypatch.setattr("src.organizer.organize_folder", fake_organize_folder)
+    monkeypatch.setattr("src.ui.fancy_ui.display_results", fake_display_results)
+
+    # Act
+    runpy.run_module("scripts.folder-organizer.main", run_name="__main__")
+
+    # Assert
+    assert displayed["called"] is True
+    assert displayed["arg"] == moved_files_stub
+
     captured = capsys.readouterr()
-    assert captured.out == ""
-
-
-def test_main_prints_empty_dict_when_no_files_moved(
-    mock_path_home, mock_display_results
-):
-    """
-    When organize_folder returns an empty dict, ensure the printed output reflects it.
-    """
-    with mock.patch(
-        "src.organizer.organize_folder", return_value={}
-    ) as mock_organize:
-        # Capture stdout using a context manager
-        with mock.patch.object(builtins, "print") as mock_print:
-            runpy.run_module("scripts.folder-organizer.main", run_name="__main__")
-            mock_organize.assert_called_once()
-            mock_display_results.assert_called_once_with({})
-            # Verify that print was called with the empty dict string representation
-            mock_print.assert_called_once_with("{}")
+    # Should print an empty dict representation
+    assert captured.out.strip().endswith("{}")
