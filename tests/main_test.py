@@ -1,75 +1,68 @@
 import builtins
-import io
 import sys
-import types
+import runpy
 from pathlib import Path
 from unittest import mock
 
 import pytest
-import runpy
 
 
 @pytest.fixture
-def fake_home(tmp_path):
-    """
-    Fixture that patches Path.home() to return a temporary directory.
-    """
-    with mock.patch.object(Path, "home", return_value=tmp_path):
-        yield tmp_path
+def mock_path_home(monkeypatch):
+    fake_home = Path("/tmp/fake_home")
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    return fake_home
 
 
 @pytest.fixture
-def mock_organize():
-    """
-    Fixture that patches src.organizer.organize_folder and returns a known result.
-    """
-    with mock.patch("src.organizer.organize_folder") as mocked:
-        mocked.return_value = {"Images": ["photo.jpg"], "Docs": ["report.pdf"]}
-        yield mocked
+def mock_organize_folder(monkeypatch):
+    with mock.patch("src.organizer.organize_folder") as m:
+        yield m
 
 
 @pytest.fixture
-def mock_display():
-    """
-    Fixture that patches src.ui.fancy_ui.display_results.
-    """
-    with mock.patch("src.ui.fancy_ui.display_results") as mocked:
-        yield mocked
+def mock_display_results(monkeypatch):
+    with mock.patch("src.ui.fancy_ui.display_results") as m:
+        yield m
 
 
-def test_main_executes_functions(fake_home, mock_organize, mock_display, capsys):
-    """
-    Verify that the script's __main__ block:
-    - Calls organize_folder with the user's Downloads directory.
-    - Calls display_results with the result of organize_folder.
-    - Prints the result to stdout.
-    """
-    # Run the module as a script
-    runpy.run_module("scripts.folder-organizer.main", run_name="__main__")
-
-    # Expected path to the Downloads folder
-    expected_downloads = fake_home / "Downloads"
-
-    # Assert organize_folder was called once with the correct argument
-    mock_organize.assert_called_once_with(expected_downloads)
-
-    # Assert display_results was called once with the result from organize_folder
-    mock_display.assert_called_once_with(mock_organize.return_value)
-
-    # Capture printed output and verify it contains the string representation of the moved files
-    captured = capsys.readouterr()
-    assert str(mock_organize.return_value) in captured.out
+@pytest.fixture
+def mock_print(monkeypatch):
+    with mock.patch.object(builtins, "print") as m:
+        yield m
 
 
-def test_main_handles_exception(fake_home, mock_display):
-    """
-    Ensure that if organize_folder raises an exception, the script propagates it
-    and does not call display_results.
-    """
-    with mock.patch("src.organizer.organize_folder", side_effect=RuntimeError("organizer error")) as mock_organize:
-        with pytest.raises(RuntimeError, match="organizer error"):
-            runpy.run_module("scripts.folder-organizer.main", run_name="__main__")
+def test_main_exec_calls_functions(
+    mock_path_home,
+    mock_organize_folder,
+    mock_display_results,
+    mock_print,
+):
+    # Arrange
+    expected_path = mock_path_home / "Downloads"
+    moved_files_stub = {"txt": ["a.txt"], "images": ["b.png"]}
+    mock_organize_folder.return_value = moved_files_stub
 
-        # display_results should never be called
-        mock_display.assert_not_called()
-        mock_organize.assert_called_once_with(fake_home / "Downloads")
+    # Act
+    runpy.run_path("scripts/folder-organizer/main.py", run_name="__main__")
+
+    # Assert
+    mock_organize_folder.assert_called_once_with(expected_path)
+    mock_display_results.assert_called_once_with(moved_files_stub)
+    mock_print.assert_called_once_with(moved_files_stub)
+
+
+def test_main_propagates_organize_exception(
+    mock_path_home,
+    mock_display_results,
+    mock_print,
+):
+    # Arrange
+    with mock.patch("src.organizer.organize_folder", side_effect=RuntimeError("organize error")):
+        # Act & Assert
+        with pytest.raises(RuntimeError, match="organize error"):
+            runpy.run_path("scripts/folder-organizer/main.py", run_name="__main__")
+
+    # Ensure display_results and print were never called
+    mock_display_results.assert_not_called()
+    mock_print.assert_not_called()
