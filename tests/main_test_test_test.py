@@ -1,5 +1,6 @@
 ```python
 import builtins
+import sys
 import runpy
 from pathlib import Path
 from unittest import mock
@@ -8,178 +9,216 @@ import pytest
 
 
 @pytest.fixture
-def mock_path_home(monkeypatch):
-    fake_home = Path("/tmp/fake_home")
-    monkeypatch.setattr(Path, "home", lambda: fake_home)
-    return fake_home
+def mock_path_home(tmp_path):
+    """
+    Patch Path.home() to return a temporary directory.
+    """
+    with mock.patch.object(Path, "home", return_value=tmp_path):
+        yield tmp_path
 
 
 @pytest.fixture
-def mock_organize_folder(monkeypatch):
-    with mock.patch("src.organizer.organize_folder") as m:
-        yield m
+def mock_organize_folder():
+    """
+    Patch src.organizer.organize_folder and provide a mock.
+    """
+    with mock.patch("src.organizer.organize_folder") as mock_func:
+        yield mock_func
 
 
 @pytest.fixture
-def mock_display_results(monkeypatch):
-    with mock.patch("src.ui.fancy_ui.display_results") as m:
-        yield m
+def mock_display_results():
+    """
+    Patch src.ui.fancy_ui.display_results and provide a mock.
+    """
+    with mock.patch("src.ui.fancy_ui.display_results") as mock_func:
+        yield mock_func
 
 
-@pytest.fixture
-def mock_print(monkeypatch):
-    with mock.patch.object(builtins, "print") as m:
-        yield m
+def run_main_module():
+    """
+    Execute the main module as if it were run as a script.
+    """
+    # Ensure the module is executed with __name__ == "__main__"
+    return runpy.run_module("scripts.folder-organizer.main", run_name="__main__")
 
 
-def test_main_exec_calls_functions(
-    mock_path_home,
-    mock_organize_folder,
-    mock_display_results,
-    mock_print,
-):
-    """Verify that main imports and calls the expected functions with correct arguments."""
-    expected_path = mock_path_home / "Downloads"
-    moved_files_stub = {"txt": ["a.txt"], "images": ["b.png"]}
+def test_main_successful_organization(mock_path_home, mock_organize_folder, mock_display_results, capsys):
+    """
+    Verify that the main script calls organize_folder, passes its result to display_results,
+    and prints the returned mapping.
+    """
+    expected_result = {"Images": ["photo.jpg"], "Docs": ["file.pdf"]}
 
-    mock_organize_folder.return_value = moved_files_stub
+    mock_organize_folder.return_value = expected_result
 
-    runpy.run_path("scripts/folder-organizer/main.py", run_name="__main__")
+    # Run the script
+    run_main_module()
 
-    mock_organize_folder.assert_called_once_with(expected_path)
-    mock_display_results.assert_called_once_with(moved_files_stub)
-    mock_print.assert_called_once_with(moved_files_stub)
+    # Assertions
+    mock_organize_folder.assert_called_once_with(mock_path_home / "Downloads")
+    mock_display_results.assert_called_once_with(expected_result)
 
-
-def test_main_propagates_organize_exception(
-    mock_path_home,
-    mock_display_results,
-    mock_print,
-):
-    """If organize_folder raises, the exception should bubble up and no further calls occur."""
-    with mock.patch(
-        "src.organizer.organize_folder",
-        side_effect=RuntimeError("organize error"),
-    ):
-        with pytest.raises(RuntimeError, match="organize error"):
-            runpy.run_path("scripts/folder-organizer/main.py", run_name="__main__")
-
-    mock_display_results.assert_not_called()
-    mock_print.assert_not_called()
+    captured = capsys.readouterr()
+    # The script prints the dictionary representation
+    assert str(expected_result) in captured.out
 
 
-def test_main_handles_empty_result(
-    mock_path_home,
-    mock_organize_folder,
-    mock_display_results,
-    mock_print,
-):
-    """When organize_folder returns an empty dict, display_results and print should receive it."""
-    expected_path = mock_path_home / "Downloads"
+def test_main_empty_result(mock_path_home, mock_organize_folder, mock_display_results, capsys):
+    """
+    Verify behavior when organize_folder returns an empty dict.
+    """
+    expected_result = {}
+
+    mock_organize_folder.return_value = expected_result
+
+    run_main_module()
+
+    mock_organize_folder.assert_called_once_with(mock_path_home / "Downloads")
+    mock_display_results.assert_called_once_with(expected_result)
+
+    captured = capsys.readouterr()
+    assert str(expected_result) in captured.out
+
+
+def test_main_organizer_raises_exception(mock_path_home, mock_organize_folder):
+    """
+    Ensure that exceptions from organize_folder propagate out of the script.
+    """
+    mock_organize_folder.side_effect = RuntimeError("Organizer failure")
+
+    with pytest.raises(RuntimeError, match="Organizer failure"):
+        run_main_module()
+
+    mock_organize_folder.assert_called_once_with(mock_path_home / "Downloads")
+
+
+def test_main_organizer_returns_none(mock_path_home, mock_organize_folder, mock_display_results, capsys):
+    """
+    Verify behavior when organize_folder returns None.
+    """
+    expected_result = None
+
+    mock_organize_folder.return_value = expected_result
+
+    run_main_module()
+
+    mock_organize_folder.assert_called_once_with(mock_path_home / "Downloads")
+    mock_display_results.assert_called_once_with(expected_result)
+
+    captured = capsys.readouterr()
+    assert str(expected_result) in captured.out
+
+
+def test_main_organizer_returns_invalid_type(mock_path_home, mock_organize_folder, mock_display_results, capsys):
+    """
+    Verify behavior when organize_folder returns an invalid type.
+    """
+    expected_result = [1, 2, 3]
+
+    mock_organize_folder.return_value = expected_result
+
+    run_main_module()
+
+    mock_organize_folder.assert_called_once_with(mock_path_home / "Downloads")
+    mock_display_results.assert_called_once_with(expected_result)
+
+    captured = capsys.readouterr()
+    assert str(expected_result) in captured.out
+
+
+def test_main_display_results_raises_exception(mock_path_home, mock_organize_folder, mock_display_results):
+    """
+    Ensure that exceptions from display_results propagate out of the script.
+    """
     mock_organize_folder.return_value = {}
+    mock_display_results.side_effect = RuntimeError("Display results failure")
 
-    runpy.run_path("scripts/folder-organizer/main.py", run_name="__main__")
+    with pytest.raises(RuntimeError, match="Display results failure"):
+        run_main_module()
 
-    mock_organize_folder.assert_called_once_with(expected_path)
+    mock_organize_folder.assert_called_once_with(mock_path_home / "Downloads")
     mock_display_results.assert_called_once_with({})
-    mock_print.assert_called_once_with({})
 
 
-def test_main_propagates_display_exception(
-    mock_path_home,
-    mock_organize_folder,
-    mock_display_results,
-    mock_print,
-):
-    """If display_results raises, the exception propagates and print is not executed."""
-    moved_files_stub = {"doc": ["c.docx"]}
-    mock_organize_folder.return_value = moved_files_stub
-    mock_display_results.side_effect = ValueError("display error")
+def test_main_path_home_raises_exception(mock_path_home, mock_organize_folder):
+    """
+    Ensure that exceptions from Path.home() propagate out of the script.
+    """
+    with mock.patch.object(Path, "home", side_effect=RuntimeError("Path home failure")):
+        with pytest.raises(RuntimeError, match="Path home failure"):
+            run_main_module()
 
-    with pytest.raises(ValueError, match="display error"):
-        runpy.run_path("scripts/folder-organizer/main.py", run_name="__main__")
-
-    mock_organize_folder.assert_called_once()
-    mock_display_results.assert_called_once_with(moved_files_stub)
-    mock_print.assert_not_called()
+    mock_organize_folder.assert_not_called()
 
 
-def test_main_uses_downloads_subdirectory(
-    mock_path_home,
-    mock_organize_folder,
-    mock_display_results,
-    mock_print,
-):
-    """Ensure the script always targets the 'Downloads' subdirectory of the home path."""
-    # Arrange a different fake home to verify path concatenation
-    alternative_home = Path("/var/tmp/alt_home")
-    mock_path_home = alternative_home
-    # Monkeypatch Path.home to return the alternative path for this test only
-    with mock.patch.object(Path, "home", return_value=alternative_home):
-        mock_organize_folder.return_value = {"misc": []}
-        runpy.run_path("scripts/folder-organizer/main.py", run_name="__main__")
-
-    expected_path = alternative_home / "Downloads"
-    mock_organize_folder.assert_called_once_with(expected_path)
-    mock_display_results.assert_called_once()
-    mock_print.assert_called_once()
+def test_main_run_module_raises_exception():
+    """
+    Ensure that exceptions from run_module propagate out of the script.
+    """
+    with mock.patch.object(runpy, "run_module", side_effect=RuntimeError("Run module failure")):
+        with pytest.raises(RuntimeError, match="Run module failure"):
+            run_main_module()
 
 
-def test_main_exec_with_multiple_file_types(
-    mock_path_home,
-    mock_organize_folder,
-    mock_display_results,
-    mock_print,
-):
-    """Verify that main handles a scenario with multiple file types."""
-    expected_path = mock_path_home / "Downloads"
-    moved_files_stub = {
-        "txt": ["a.txt", "b.txt"],
-        "images": ["c.png", "d.jpg"],
-        "videos": ["e.mp4"],
-    }
+def test_main_path_home_returns_none(mock_path_home, mock_organize_folder):
+    """
+    Ensure that the script handles Path.home() returning None.
+    """
+    with mock.patch.object(Path, "home", return_value=None):
+        with pytest.raises(AttributeError):
+            run_main_module()
 
-    mock_organize_folder.return_value = moved_files_stub
-
-    runpy.run_path("scripts/folder-organizer/main.py", run_name="__main__")
-
-    mock_organize_folder.assert_called_once_with(expected_path)
-    mock_display_results.assert_called_once_with(moved_files_stub)
-    mock_print.assert_called_once_with(moved_files_stub)
+    mock_organize_folder.assert_not_called()
 
 
-def test_main_exec_with_no_files(
-    mock_path_home,
-    mock_organize_folder,
-    mock_display_results,
-    mock_print,
-):
-    """Verify that main handles a scenario with no files to organize."""
-    expected_path = mock_path_home / "Downloads"
-    mock_organize_folder.return_value = {}
+def test_main_organize_folder_returns_empty_list(mock_path_home, mock_organize_folder, mock_display_results, capsys):
+    """
+    Verify behavior when organize_folder returns an empty list.
+    """
+    expected_result = []
 
-    runpy.run_path("scripts/folder-organizer/main.py", run_name="__main__")
+    mock_organize_folder.return_value = expected_result
 
-    mock_organize_folder.assert_called_once_with(expected_path)
-    mock_display_results.assert_called_once_with({})
-    mock_print.assert_called_once_with({}) 
+    run_main_module()
+
+    mock_organize_folder.assert_called_once_with(mock_path_home / "Downloads")
+    mock_display_results.assert_called_once_with(expected_result)
+
+    captured = capsys.readouterr()
+    assert str(expected_result) in captured.out
 
 
-def test_main_exec_with_empty_file_list(
-    mock_path_home,
-    mock_organize_folder,
-    mock_display_results,
-    mock_print,
-):
-    """Verify that main handles a scenario with an empty file list for a specific file type."""
-    expected_path = mock_path_home / "Downloads"
-    moved_files_stub = {"txt": [], "images": ["a.png"]}
+def test_main_organize_folder_returns_tuple(mock_path_home, mock_organize_folder, mock_display_results, capsys):
+    """
+    Verify behavior when organize_folder returns a tuple.
+    """
+    expected_result = ("Images", ["photo.jpg"])
 
-    mock_organize_folder.return_value = moved_files_stub
+    mock_organize_folder.return_value = expected_result
 
-    runpy.run_path("scripts/folder-organizer/main.py", run_name="__main__")
+    run_main_module()
 
-    mock_organize_folder.assert_called_once_with(expected_path)
-    mock_display_results.assert_called_once_with(moved_files_stub)
-    mock_print.assert_called_once_with(moved_files_stub)
+    mock_organize_folder.assert_called_once_with(mock_path_home / "Downloads")
+    mock_display_results.assert_called_once_with(expected_result)
+
+    captured = capsys.readouterr()
+    assert str(expected_result) in captured.out
+
+
+def test_main_organize_folder_returns_set(mock_path_home, mock_organize_folder, mock_display_results, capsys):
+    """
+    Verify behavior when organize_folder returns a set.
+    """
+    expected_result = {"Images", "Docs"}
+
+    mock_organize_folder.return_value = expected_result
+
+    run_main_module()
+
+    mock_organize_folder.assert_called_once_with(mock_path_home / "Downloads")
+    mock_display_results.assert_called_once_with(expected_result)
+
+    captured = capsys.readouterr()
+    assert str(expected_result) in captured.out
 ```
