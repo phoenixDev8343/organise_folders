@@ -1,141 +1,131 @@
-import importlib
+import builtins
+import io
 import sys
+import types
 from pathlib import Path
-from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 import runpy
 
 
-def _clear_main_module():
+@pytest.fixture
+def fake_home(tmp_path):
     """
-    Remove the main module from sys.modules to ensure a fresh import.
-    Handles both hyphenated and underscore module names.
+    Fixture that patches Path.home() to return a temporary directory.
     """
-    module_names = [
-        "scripts.folder-organizer.main",
-        "scripts.folder_organizer.main",
-    ]
-    for name in module_names:
-        if name in sys.modules:
-            del sys.modules[name]
+    with mock.patch.object(Path, "home", return_value=tmp_path):
+        yield tmp_path
 
 
-@pytest.fixture(autouse=True)
-def reload_main_before_test(monkeypatch):
+@pytest.fixture
+def mock_organize():
     """
-    Ensure the main module is reloaded with a clean state before each test.
+    Fixture that patches src.organizer.organize_folder and returns a known result.
     """
-    _clear_main_module()
-    yield
-    _clear_main_module()
+    with mock.patch("src.organizer.organize_folder") as mocked:
+        mocked.return_value = {"Images": ["photo.jpg"], "Docs": ["report.pdf"]}
+        yield mocked
 
 
-def test_main_calls_organize_and_display(monkeypatch, capsys):
-    # Arrange
-    fake_home = Path("/fake/home")
-    fake_downloads = fake_home / "Downloads"
-    moved_files_stub = {"txt": ["a.txt"], "pdf": ["b.pdf"]}
+@pytest.fixture
+def mock_display():
+    """
+    Fixture that patches src.ui.fancy_ui.display_results.
+    """
+    with mock.patch("src.ui.fancy_ui.display_results") as mocked:
+        yield mocked
 
-    # Mock Path.home to return our fake home directory
-    monkeypatch.setattr(Path, "home", lambda: fake_home)
 
-    # Spy objects to capture calls
-    called = SimpleNamespace(organize_args=None, display_args=None)
-
-    def fake_organize_folder(path):
-        called.organize_args = path
-        return moved_files_stub
-
-    def fake_display_results(results):
-        called.display_args = results
-
-    monkeypatch.setattr("src.organizer.organize_folder", fake_organize_folder)
-    monkeypatch.setattr("src.ui.fancy_ui.display_results", fake_display_results)
-
-    # Act
+def test_main_executes_functions(fake_home, mock_organize, mock_display, capsys):
+    """
+    Verify that the script's __main__ block:
+    - Calls organize_folder with the user's Downloads directory.
+    - Calls display_results with the result of organize_folder.
+    - Prints the result to stdout.
+    """
     runpy.run_module("scripts.folder-organizer.main", run_name="__main__")
 
-    # Assert
-    assert called.organize_args == fake_downloads
-    assert called.display_args == moved_files_stub
+    expected_downloads = fake_home / "Downloads"
+    mock_organize.assert_called_once_with(expected_downloads)
+    mock_display.assert_called_once_with(mock_organize.return_value)
 
     captured = capsys.readouterr()
-    assert str(moved_files_stub) in captured.out
+    assert str(mock_organize.return_value) in captured.out
 
 
-def test_main_with_empty_result(monkeypatch, capsys):
-    # Arrange
-    fake_home = Path("/another/fake/home")
-    fake_downloads = fake_home / "Downloads"
-    moved_files_stub = {}
+def test_main_handles_exception(fake_home, mock_display):
+    """
+    Ensure that if organize_folder raises an exception, the script propagates it
+    and does not call display_results.
+    """
+    with mock.patch(
+        "src.organizer.organize_folder",
+        side_effect=RuntimeError("organizer error")
+    ) as mock_organize:
+        with pytest.raises(RuntimeError, match="organizer error"):
+            runpy.run_module("scripts.folder-organizer.main", run_name="__main__")
 
-    monkeypatch.setattr(Path, "home", lambda: fake_home)
+        mock_display.assert_not_called()
+        mock_organize.assert_called_once_with(fake_home / "Downloads")
 
-    def fake_organize_folder(path):
-        # Verify the function receives the expected path
-        assert path == fake_downloads
-        return moved_files_stub
 
-    displayed = {"called": False, "arg": None}
+def test_main_with_empty_result(fake_home, mock_display):
+    """
+    Verify behavior when organize_folder returns an empty dictionary.
+    The script should still print the empty dict and call display_results.
+    """
+    with mock.patch(
+        "src.organizer.organize_folder",
+        return_value={}
+    ) as mock_organize:
+        runpy.run_module("scripts.folder-organizer.main", run_name="__main__")
 
-    def fake_display_results(results):
-        displayed["called"] = True
-        displayed["arg"] = results
+        mock_organize.assert_called_once_with(fake_home / "Downloads")
+        mock_display.assert_called_once_with({})
+        # Ensure the printed output reflects the empty result
+        captured = capsys.readouterr()
+        assert "{}" in captured.out
 
-    monkeypatch.setattr("src.organizer.organize_folder", fake_organize_folder)
-    monkeypatch.setattr("src.ui.fancy_ui.display_results", fake_display_results)
 
-    # Act
+def test_main_display_raises_propagates(fake_home, mock_organize):
+    """
+    If display_results raises an exception, it should propagate and the script
+    should not suppress it.
+    """
+    with mock.patch(
+        "src.ui.fancy_ui.display_results",
+        side_effect=ValueError("display error")
+    ) as mock_display:
+        with pytest.raises(ValueError, match="display error"):
+            runpy.run_module("scripts.folder-organizer.main", run_name="__main__")
+
+        mock_organize.assert_called_once_with(fake_home / "Downloads")
+        mock_display.assert_called_once_with(mock_organize.return_value)
+
+
+def test_main_downloads_path_missing(fake_home, mock_organize, mock_display):
+    """
+    Simulate a scenario where the Downloads directory does not exist.
+    The script should still pass the expected path to organize_folder.
+    """
+    # Remove the Downloads folder if it was inadvertently created
+    downloads_path = fake_home / "Downloads"
+    if downloads_path.exists():
+        downloads_path.rmdir()
+
     runpy.run_module("scripts.folder-organizer.main", run_name="__main__")
 
-    # Assert
-    assert displayed["called"] is True
-    assert displayed["arg"] == moved_files_stub
+    mock_organize.assert_called_once_with(downloads_path)
+    mock_display.assert_called_once_with(mock_organize.return_value)
 
+
+def test_main_stdout_is_string_representation(fake_home, mock_organize, capsys):
+    """
+    Ensure that the printed output is exactly the string representation of the
+    dictionary returned by organize_folder (including ordering).
+    """
+    runpy.run_module("scripts.folder-organizer.main", run_name="__main__")
     captured = capsys.readouterr()
-    assert captured.out.strip().endswith("{}")
-
-
-def test_main_organize_raises_exception(monkeypatch):
-    # Arrange
-    fake_home = Path("/error/home")
-    monkeypatch.setattr(Path, "home", lambda: fake_home)
-
-    class DummyError(RuntimeError):
-        pass
-
-    def fake_organize_folder(_):
-        raise DummyError("Organize failed")
-
-    monkeypatch.setattr("src.organizer.organize_folder", fake_organize_folder)
-
-    # Act & Assert
-    with pytest.raises(DummyError):
-        runpy.run_module("scripts.folder-organizer.main", run_name="__main__")
-
-
-def test_main_display_raises_exception(monkeypatch):
-    # Arrange
-    fake_home = Path("/display/error")
-    fake_downloads = fake_home / "Downloads"
-    moved_files_stub = {"img": ["pic.jpg"]}
-
-    monkeypatch.setattr(Path, "home", lambda: fake_home)
-
-    def fake_organize_folder(path):
-        assert path == fake_downloads
-        return moved_files_stub
-
-    class DisplayError(RuntimeError):
-        pass
-
-    def fake_display_results(_):
-        raise DisplayError("Display failed")
-
-    monkeypatch.setattr("src.organizer.organize_folder", fake_organize_folder)
-    monkeypatch.setattr("src.ui.fancy_ui.display_results", fake_display_results)
-
-    # Act & Assert
-    with pytest.raises(DisplayError):
-        runpy.run_module("scripts.folder-organizer.main", run_name="__main__")
+    # The output may contain a newline; strip for comparison
+    assert captured.out.strip() == str(mock_organize.return_value)
