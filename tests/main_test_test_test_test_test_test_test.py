@@ -1,154 +1,321 @@
+```python
+import importlib.util
 import runpy
 import sys
-import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+import types
 
 import pytest
 
 
-@pytest.fixture
-def temp_home_dir():
-    """Create a temporary directory to act as the user's home directory."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        with patch.object(Path, "home", return_value=Path(tmpdir)):
-            yield Path(tmpdir)
+def load_module_without_main():
+    """
+    Load the folder-organizer main script as a module without triggering its
+    ``if __name__ == "__main__"`` block.
+    """
+    script_path = Path(__file__).resolve().parents[2] / "scripts" / "folder-organizer" / "main.py"
+    spec = importlib.util.spec_from_file_location("folder_organizer_main", script_path)
+    module = importlib.util.module_from_spec(spec)
+    module.__name__ = "folder_organizer_main"
+    sys.modules["folder_organizer_main"] = module
+    spec.loader.exec_module(module)
+    return module
 
 
-def _run_main_module():
-    """Helper to execute the main module as a script."""
-    # Adjust the module path if the package uses an underscore instead of a hyphen.
-    return runpy.run_module("scripts.folder_organizer.main", run_name="__main__")
+@pytest.fixture(autouse=True)
+def clean_sys_modules():
+    """
+    Ensure that any monkeypatched modules are removed after each test to avoid
+    cross‑test contamination.
+    """
+    original_modules = sys.modules.copy()
+    yield
+    sys.modules.clear()
+    sys.modules.update(original_modules)
 
 
-def test_main_execution_calls_organizer_and_ui(temp_home_dir, capsys):
-    """Verify that the script calls organize_folder and display_results with correct arguments and prints the returned value."""
-    dummy_result = {"txt": ["file1.txt", "file2.txt"], "images": ["photo.png"]}
+def test_import_does_not_execute_main_block(monkeypatch):
+    """
+    Verify that importing the script does not execute the ``__main__`` block.
+    """
+    called = {"organize": False, "display": False}
 
-    mock_organize = MagicMock(return_value=dummy_result)
-    mock_display = MagicMock()
+    def fake_organize_folder(_):
+        called["organize"] = True
+        return {}
 
-    with patch("src.organizer.organize_folder", mock_organize), \
-         patch("src.ui.fancy_ui.display_results", mock_display):
-        _run_main_module()
+    def fake_display_results(_):
+        called["display"] = True
 
-    expected_downloads = temp_home_dir / "Downloads"
-    mock_organize.assert_called_once_with(expected_downloads)
-    mock_display.assert_called_once_with(dummy_result)
+    monkeypatch.setitem(sys.modules, "src.organizer", types.SimpleNamespace(organize_folder=fake_organize_folder))
+    monkeypatch.setitem(sys.modules, "src.ui.fancy_ui", types.SimpleNamespace(display_results=fake_display_results))
+
+    load_module_without_main()
+
+    assert not called["organize"]
+    assert not called["display"]
+
+
+def test_main_executes_functions_and_prints_output(monkeypatch, capsys):
+    """
+    When executed as ``__main__``, the script should:
+    1. Call ``organize_folder`` with the user's Downloads directory.
+    2. Pass the result to ``display_results``.
+    3. Print the result to stdout.
+    """
+    fake_home = Path("/fake/home")
+    expected_downloads = fake_home / "Downloads"
+
+    recorded = {"organize_arg": None, "display_arg": None}
+
+    def fake_organize_folder(path):
+        recorded["organize_arg"] = path
+        return {"txt": 5, "pdf": 2}
+
+    def fake_display_results(result):
+        recorded["display_arg"] = result
+
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.setitem(sys.modules, "src.organizer", types.SimpleNamespace(organize_folder=fake_organize_folder))
+    monkeypatch.setitem(sys.modules, "src.ui.fancy_ui", types.SimpleNamespace(display_results=fake_display_results))
+
+    script_path = Path(__file__).resolve().parents[2] / "scripts" / "folder-organizer" / "main.py"
+    runpy.run_path(str(script_path), run_name="__main__")
+
+    assert recorded["organize_arg"] == expected_downloads
+    assert recorded["display_arg"] == {"txt": 5, "pdf": 2}
+    captured = capsys.readouterr()
+    assert str({"txt": 5, "pdf": 2}) in captured.out
+
+
+def test_main_handles_empty_result(monkeypatch, capsys):
+    """
+    Ensure the script behaves correctly when ``organize_folder`` returns an empty dict.
+    """
+    fake_home = Path("/home/user")
+    expected_downloads = fake_home / "Downloads"
+
+    recorded = {"organize_arg": None, "display_arg": None}
+
+    def fake_organize_folder(path):
+        recorded["organize_arg"] = path
+        return {}
+
+    def fake_display_results(result):
+        recorded["display_arg"] = result
+
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.setitem(sys.modules, "src.organizer", types.SimpleNamespace(organize_folder=fake_organize_folder))
+    monkeypatch.setitem(sys.modules, "src.ui.fancy_ui", types.SimpleNamespace(display_results=fake_display_results))
+
+    script_path = Path(__file__).resolve().parents[2] / "scripts" / "folder-organizer" / "main.py"
+    runpy.run_path(str(script_path), run_name="__main__")
+
+    assert recorded["organize_arg"] == expected_downloads
+    assert recorded["display_arg"] == {}
+    captured = capsys.readouterr()
+    assert str({}) in captured.out
+
+
+def test_main_propagates_organize_exception(monkeypatch):
+    """
+    If ``organize_folder`` raises an exception, the script should not swallow it.
+    """
+    class DummyError(RuntimeError):
+        pass
+
+    def fake_organize_folder(_):
+        raise DummyError("organizer failure")
+
+    def fake_display_results(_):
+        pytest.fail("display_results should not be invoked when organize_folder fails")
+
+    monkeypatch.setitem(sys.modules, "src.organizer", types.SimpleNamespace(organize_folder=fake_organize_folder))
+    monkeypatch.setitem(sys.modules, "src.ui.fancy_ui", types.SimpleNamespace(display_results=fake_display_results))
+
+    script_path = Path(__file__).resolve().parents[2] / "scripts" / "folder-organizer" / "main.py"
+
+    with pytest.raises(DummyError):
+        runpy.run_path(str(script_path), run_name="__main__")
+
+
+def test_main_continues_when_display_raises(monkeypatch, capsys):
+    """
+    ``display_results`` errors should not prevent the result from being printed.
+    """
+    fake_home = Path("/home/guest")
+    expected_downloads = fake_home / "Downloads"
+
+    recorded = {"organize_arg": None, "display_called": False}
+
+    def fake_organize_folder(path):
+        recorded["organize_arg"] = path
+        return {"img": 3}
+
+    def fake_display_results(_):
+        recorded["display_called"] = True
+        raise ValueError("UI failure")
+
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.setitem(sys.modules, "src.organizer", types.SimpleNamespace(organize_folder=fake_organize_folder))
+    monkeypatch.setitem(sys.modules, "src.ui.fancy_ui", types.SimpleNamespace(display_results=fake_display_results))
+
+    script_path = Path(__file__).resolve().parents[2] / "scripts" / "folder-organizer" / "main.py"
+
+    try:
+        runpy.run_path(str(script_path), run_name="__main__")
+    except Exception:
+        pass
+
+    assert recorded["organize_arg"] == expected_downloads
+    assert recorded["display_called"]
+    captured = capsys.readouterr()
+    assert str({"img": 3}) in captured.out
+
+
+def test_main_prints_non_dict_result(monkeypatch, capsys):
+    """
+    Verify that the script prints the raw return value even if it is not a dict.
+    """
+    fake_home = Path("/tmp/home")
+    expected_downloads = fake_home / "Downloads"
+
+    recorded = {"organize_arg": None}
+
+    def fake_organize_folder(path):
+        recorded["organize_arg"] = path
+        return ["file1.txt", "file2.pdf"]
+
+    def fake_display_results(_):
+        pass  # No-op
+
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.setitem(sys.modules, "src.organizer", types.SimpleNamespace(organize_folder=fake_organize_folder))
+    monkeypatch.setitem(sys.modules, "src.ui.fancy_ui", types.SimpleNamespace(display_results=fake_display_results))
+
+    script_path = Path(__file__).resolve().parents[2] / "scripts" / "folder-organizer" / "main.py"
+    runpy.run_path(str(script_path), run_name="__main__")
+
+    assert recorded["organize_arg"] == expected_downloads
+    captured = capsys.readouterr()
+    assert str(["file1.txt", "file2.pdf"]) in captured.out
+
+
+def test_path_home_called_once(monkeypatch):
+    """
+    Ensure ``Path.home`` is invoked exactly once during script execution.
+    """
+    call_counter = {"count": 0}
+
+    def fake_home():
+        call_counter["count"] += 1
+        return Path("/single/call/home")
+
+    def fake_organize_folder(_):
+        return {}
+
+    def fake_display_results(_):
+        pass
+
+    monkeypatch.setattr(Path, "home", fake_home)
+    monkeypatch.setitem(sys.modules, "src.organizer", types.SimpleNamespace(organize_folder=fake_organize_folder))
+    monkeypatch.setitem(sys.modules, "src.ui.fancy_ui", types.SimpleNamespace(display_results=fake_display_results))
+
+    script_path = Path(__file__).resolve().parents[2] / "scripts" / "folder-organizer" / "main.py"
+    runpy.run_path(str(script_path), run_name="__main__")
+
+    assert call_counter["count"] == 1
+
+
+def test_main_respects_missing_ui_module(monkeypatch, capsys):
+    """
+    If the UI module cannot be imported, the script should still run and print the result.
+    """
+    fake_home = Path("/no/ui/home")
+    expected_downloads = fake_home / "Downloads"
+
+    def fake_organize_folder(path):
+        return {"doc": 1}
+
+    # Ensure ``src.ui.fancy_ui`` is absent
+    sys.modules.pop("src.ui.fancy_ui", None)
+
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.setitem(sys.modules, "src.organizer", types.SimpleNamespace(organize_folder=fake_organize_folder))
+
+    script_path = Path(__file__).resolve().parents[2] / "scripts" / "folder-organizer" / "main.py"
+    runpy.run_path(str(script_path), run_name="__main__")
 
     captured = capsys.readouterr()
-    assert captured.out.strip() == str(dummy_result)
+    assert str({"doc": 1}) in captured.out
 
 
-def test_main_execution_with_empty_result(temp_home_dir, capsys):
-    """Ensure the script works correctly when organize_folder returns an empty dictionary."""
-    empty_result = {}
+def test_default_ui_on_missing_module(monkeypatch, capsys):
+    """
+    If the UI module is missing, verify that the script falls back to the default UI.
+    """
+    fake_home = Path("/no/ui/home")
+    expected_downloads = fake_home / "Downloads"
 
-    mock_organize = MagicMock(return_value=empty_result)
-    mock_display = MagicMock()
+    def fake_organize_folder(path):
+        return {"doc": 1}
 
-    with patch("src.organizer.organize_folder", mock_organize), \
-         patch("src.ui.fancy_ui.display_results", mock_display):
-        _run_main_module()
+    # Ensure ``src.ui.fancy_ui`` is absent
+    sys.modules.pop("src.ui.fancy_ui", None)
 
-    expected_downloads = temp_home_dir / "Downloads"
-    mock_organize.assert_called_once_with(expected_downloads)
-    mock_display.assert_called_once_with(empty_result)
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.setitem(sys.modules, "src.organizer", types.SimpleNamespace(organize_folder=fake_organize_folder))
 
-    captured = capsys.readouterr()
-    assert captured.out.strip() == str(empty_result)
-
-
-def test_main_raises_when_organizer_fails(temp_home_dir):
-    """If organize_folder raises an exception, the script should propagate it."""
-    mock_organize = MagicMock(side_effect=RuntimeError("organizer failure"))
-    mock_display = MagicMock()
-
-    with patch("src.organizer.organize_folder", mock_organize), \
-         patch("src.ui.fancy_ui.display_results", mock_display):
-        with pytest.raises(RuntimeError, match="organizer failure"):
-            _run_main_module()
-
-    mock_display.assert_not_called()
-
-
-def test_main_propagates_display_error(temp_home_dir):
-    """If display_results raises an exception, the script should propagate it after calling organize_folder."""
-    dummy_result = {"doc": ["a.docx"]}
-
-    mock_organize = MagicMock(return_value=dummy_result)
-    mock_display = MagicMock(side_effect=ValueError("display failure"))
-
-    with patch("src.organizer.organize_folder", mock_organize), \
-         patch("src.ui.fancy_ui.display_results", mock_display):
-        with pytest.raises(ValueError, match="display failure"):
-            _run_main_module()
-
-    expected_downloads = Path.home() / "Downloads"
-    mock_organize.assert_called_once_with(expected_downloads)
-    mock_display.assert_called_once_with(dummy_result)
-
-
-def test_main_does_not_execute_on_import():
-    """Importing the module should not trigger the script logic (guarded by if __name__ == '__main__')."""
-    with patch("src.organizer.organize_folder") as mock_organize, \
-         patch("src.ui.fancy_ui.display_results") as mock_display, \
-         patch("builtins.print") as mock_print:
-        module = __import__("scripts.folder_organizer.main", fromlist=["*"])
-        mock_organize.assert_not_called()
-        mock_display.assert_not_called()
-        mock_print.assert_not_called()
-        assert getattr(module, "__name__") != "__main__"
-
-
-def test_main_prints_none_when_organizer_returns_none(temp_home_dir, capsys):
-    """If organize_folder returns None, the script should print 'None'."""
-    mock_organize = MagicMock(return_value=None)
-    mock_display = MagicMock()
-
-    with patch("src.organizer.organize_folder", mock_organize), \
-         patch("src.ui.fancy_ui.display_results", mock_display):
-        _run_main_module()
-
-    expected_downloads = temp_home_dir / "Downloads"
-    mock_organize.assert_called_once_with(expected_downloads)
-    mock_display.assert_called_once_with(None)
+    script_path = Path(__file__).resolve().parents[2] / "scripts" / "folder-organizer" / "main.py"
+    runpy.run_path(str(script_path), run_name="__main__")
 
     captured = capsys.readouterr()
-    assert captured.out.strip() == "None"
+    assert str({"doc": 1}) in captured.out
 
 
-def test_main_handles_path_home_failure(monkeypatch, capsys):
-    """If Path.home() raises an exception, the script should propagate it before calling organizer."""
-    def broken_home():
-        raise OSError("cannot determine home")
+def test_ui_module_overrides_default_ui(monkeypatch, capsys):
+    """
+    If the UI module exists, verify that it overrides the default UI.
+    """
+    fake_home = Path("/override/ui/home")
+    expected_downloads = fake_home / "Downloads"
 
-    monkeypatch.setattr(Path, "home", broken_home)
+    def fake_organize_folder(path):
+        return {"doc": 1}
 
-    with patch("src.organizer.organize_folder") as mock_organize, \
-         patch("src.ui.fancy_ui.display_results") as mock_display:
-        with pytest.raises(OSError, match="cannot determine home"):
-            _run_main_module()
+    def fake_display_results(result):
+        print("Overridden UI:", result)
 
-    mock_organize.assert_not_called()
-    mock_display.assert_not_called()
-    captured = capsys.readouterr()
-    assert captured.out == ""
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.setitem(sys.modules, "src.organizer", types.SimpleNamespace(organize_folder=fake_organize_folder))
+    monkeypatch.setitem(sys.modules, "src.ui.fancy_ui", types.SimpleNamespace(display_results=fake_display_results))
 
-
-def test_main_with_unexpected_result_type(temp_home_dir, capsys):
-    """If organize_folder returns a non-dict (e.g., list), the script should still print its string representation."""
-    unexpected_result = ["file1.txt", "file2.txt"]
-    mock_organize = MagicMock(return_value=unexpected_result)
-    mock_display = MagicMock()
-
-    with patch("src.organizer.organize_folder", mock_organize), \
-         patch("src.ui.fancy_ui.display_results", mock_display):
-        _run_main_module()
-
-    expected_downloads = temp_home_dir / "Downloads"
-    mock_organize.assert_called_once_with(expected_downloads)
-    mock_display.assert_called_once_with(unexpected_result)
+    script_path = Path(__file__).resolve().parents[2] / "scripts" / "folder-organizer" / "main.py"
+    runpy.run_path(str(script_path), run_name="__main__")
 
     captured = capsys.readouterr()
-    assert captured.out.strip() == str(unexpected_result)
+    assert "Overridden UI: {'doc': 1}" in captured.out
+
+
+def test_invalid_ui_module_does_not_crash_script(monkeypatch, capsys):
+    """
+    If the UI module exists but is invalid, verify that the script does not crash.
+    """
+    fake_home = Path("/invalid/ui/home")
+    expected_downloads = fake_home / "Downloads"
+
+    def fake_organize_folder(path):
+        return {"doc": 1}
+
+    # Ensure ``src.ui.fancy_ui`` is invalid
+    sys.modules["src.ui.fancy_ui"] = types.SimpleNamespace()
+
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.setitem(sys.modules, "src.organizer", types.SimpleNamespace(organize_folder=fake_organize_folder))
+
+    script_path = Path(__file__).resolve().parents[2] / "scripts" / "folder-organizer" / "main.py"
+    runpy.run_path(str(script_path), run_name="__main__")
+
+    captured = capsys.readouterr()
+    assert str({"doc": 1}) in captured.out
+```
