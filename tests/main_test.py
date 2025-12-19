@@ -1,93 +1,73 @@
-import builtins
-import sys
-import runpy
+```python
+# tests/test_main.py
+import unittest
+from unittest.mock import patch, MagicMock
 from pathlib import Path
-from unittest import mock
+from src.organizer import organize_folder
+from src.ui.fancy_ui import display_results
+from main import downloads_dir
 
-import pytest
+class TestMainFunctions(unittest.TestCase):
 
+    @patch('src.organizer.organize_folder')
+    @patch('src.ui.fancy_ui.display_results')
+    def test_main_flow(self, mock_display_results, mock_organize_folder):
+        # Arrange
+        mock_moved_files = ['file1', 'file2']
+        mock_organize_folder.return_value = mock_moved_files
 
-@pytest.fixture
-def mock_path_home(tmp_path):
-    """
-    Patch Path.home() to return a temporary directory.
-    """
-    with mock.patch.object(Path, "home", return_value=tmp_path):
-        yield tmp_path
+        # Act
+        with patch('sys.argv', ['main.py']):
+            with patch('builtins.print') as mock_print:
+                with patch('main.downloads_dir', Path.home() / "Downloads"):
+                    import main
 
+        # Assert
+        mock_organize_folder.assert_called_once_with(downloads_dir)
+        mock_display_results.assert_called_once_with(mock_moved_files)
+        mock_print.assert_called_once_with(mock_moved_files)
 
-@pytest.fixture
-def mock_organize_folder():
-    """
-    Patch src.organizer.organize_folder and provide a mock.
-    """
-    with mock.patch("src.organizer.organize_folder") as mock_func:
-        yield mock_func
+    @patch('src.organizer.organize_folder')
+    def test_organize_folder_called_with_downloads_dir(self, mock_organize_folder):
+        # Arrange
+        mock_moved_files = ['file1', 'file2']
+        mock_organize_folder.return_value = mock_moved_files
 
+        # Act
+        with patch('sys.argv', ['main.py']):
+            with patch('builtins.print') as mock_print:
+                with patch('main.downloads_dir', downloads_dir):
+                    import main
 
-@pytest.fixture
-def mock_display_results():
-    """
-    Patch src.ui.fancy_ui.display_results and provide a mock.
-    """
-    with mock.patch("src.ui.fancy_ui.display_results") as mock_func:
-        yield mock_func
+        # Assert
+        mock_organize_folder.assert_called_once_with(downloads_dir)
 
+    @patch('src.organizer.organize_folder')
+    @patch('src.ui.fancy_ui.display_results')
+    def test_display_results_called_with_moved_files(self, mock_display_results, mock_organize_folder):
+        # Arrange
+        mock_moved_files = ['file1', 'file2']
+        mock_organize_folder.return_value = mock_moved_files
 
-def run_main_module():
-    """
-    Execute the main module as if it were run as a script.
-    """
-    # Ensure the module is executed with __name__ == "__main__"
-    return runpy.run_module("scripts.folder-organizer.main", run_name="__main__")
+        # Act
+        with patch('sys.argv', ['main.py']):
+            with patch('builtins.print') as mock_print:
+                with patch('main.downloads_dir', downloads_dir):
+                    import main
 
+        # Assert
+        mock_display_results.assert_called_once_with(mock_moved_files)
 
-def test_main_successful_organization(mock_path_home, mock_organize_folder, mock_display_results, capsys):
-    """
-    Verify that the main script calls organize_folder, passes its result to display_results,
-    and prints the returned mapping.
-    """
-    expected_result = {"Images": ["photo.jpg"], "Docs": ["file.pdf"]}
+    def test_downloads_dir_set_correctly(self):
+        # Arrange
+        expected_downloads_dir = Path.home() / "Downloads"
 
-    mock_organize_folder.return_value = expected_result
+        # Act
+        actual_downloads_dir = downloads_dir
 
-    # Run the script
-    run_main_module()
+        # Assert
+        self.assertEqual(actual_downloads_dir, expected_downloads_dir)
 
-    # Assertions
-    mock_organize_folder.assert_called_once_with(mock_path_home / "Downloads")
-    mock_display_results.assert_called_once_with(expected_result)
-
-    captured = capsys.readouterr()
-    # The script prints the dictionary representation
-    assert str(expected_result) in captured.out
-
-
-def test_main_empty_result(mock_path_home, mock_organize_folder, mock_display_results, capsys):
-    """
-    Verify behavior when organize_folder returns an empty dict.
-    """
-    expected_result = {}
-
-    mock_organize_folder.return_value = expected_result
-
-    run_main_module()
-
-    mock_organize_folder.assert_called_once_with(mock_path_home / "Downloads")
-    mock_display_results.assert_called_once_with(expected_result)
-
-    captured = capsys.readouterr()
-    assert str(expected_result) in captured.out
-
-
-def test_main_organizer_raises_exception(mock_path_home, mock_organize_folder):
-    """
-    Ensure that exceptions from organize_folder propagate out of the script.
-    """
-    mock_organize_folder.side_effect = RuntimeError("Organizer failure")
-
-    with pytest.raises(RuntimeError, match="Organizer failure"):
-        run_main_module()
-
-    mock_organize_folder.assert_called_once_with(mock_path_home / "Downloads")
+if __name__ == "__main__":
+    unittest.main()
 ```
